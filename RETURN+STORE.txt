@@ -1,0 +1,176 @@
+INTEGRATE BOTH THE BELOW CODES INTO ONE FLASK API CODE
+
+
+# CODE 1
+# from fastapi import FastAPI, HTTPException
+# from fastapi.responses import JSONResponse
+# import cv2
+# import json
+# from PIL import Image
+# import google.generativeai as genai
+
+# # 🔐 Gemini Config
+# genai.configure(api_key="AIzaSyB9gKOT0r4k73X5i-Gt6JNpfLMxWq3HUa8")
+# model = genai.GenerativeModel("gemini-2.0-flash")
+
+# app = FastAPI()
+
+# def extract_product_info_from_image(frame):
+#     pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+#     try:
+#         response = model.generate_content([
+#             "Extract the product details from this image in JSON format. Only return JSON with keys: name, brand, product_type, size, expiry, price, sku.",
+#             pil_image
+#         ])
+#         raw_text = response.text.strip()
+#         if raw_text.startswith("```json"):
+#             raw_text = raw_text.replace("```json", "").replace("```", "").strip()
+
+#         data = json.loads(raw_text)
+
+#         if isinstance(data, list):
+#             data = sorted(data, key=lambda x: sum(bool(v) for v in x.values()), reverse=True)[0]
+
+#         return {"status": "success", "data": data}
+
+#     except Exception as e:
+#         return {"status": "error", "message": str(e)}
+
+# @app.get("/capture")
+# def capture_and_extract():
+#     cap = cv2.VideoCapture(0)
+#     if not cap.isOpened():
+#         raise HTTPException(status_code=500, detail="Failed to open camera")
+
+#     ret, frame = cap.read()
+#     cap.release()
+
+#     if not ret:
+#         raise HTTPException(status_code=500, detail="Failed to capture image")
+
+#     result = extract_product_info_from_image(frame)
+
+#     if result["status"] == "success":
+#         return JSONResponse(content=result)
+#     else:
+#         raise HTTPException(status_code=500, detail=result["message"])
+
+
+
+
+
+
+
+
+
+
+# CODE 2
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import pymysql
+from datetime import datetime
+
+app = FastAPI()
+
+# MySQL configuration
+MYSQL_HOST = "localhost"
+MYSQL_USER = "root"
+MYSQL_PASSWORD = "ritik@01A"
+DATABASE_NAME = "scanner"
+TABLE_NAME = "products"
+
+# Pydantic model for request body validation
+class Product(BaseModel):
+    name: str
+    brand: str
+    product_type: str
+    size: str
+    expiry: str
+    price: str
+    sku: str
+
+# Setup database and table
+def setup_mysql():
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD
+    )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {DATABASE_NAME}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=DATABASE_NAME
+    )
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255),
+                    brand VARCHAR(255),
+                    product_type VARCHAR(100),
+                    size VARCHAR(50),
+                    expiry DATE,
+                    price DECIMAL(10,2),
+                    sku VARCHAR(50)
+                )
+            """)
+        conn.commit()
+    finally:
+        conn.close()
+
+# FastAPI endpoint to insert product
+@app.post("/add_product")
+async def add_product(product: Product):
+    # Validate expiry date
+    try:
+        expiry_date = datetime.strptime(product.expiry, "%d/%m/%y").strftime("%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid expiry date format")
+
+    try:
+        # Insert product into MySQL database
+        conn = pymysql.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=DATABASE_NAME
+        )
+        with conn.cursor() as cursor:
+            sql = f"""
+            INSERT INTO {TABLE_NAME} (name, brand, product_type, size, expiry, price, sku)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql, (
+                product.name,
+                product.brand,
+                product.product_type,
+                product.size,
+                expiry_date,
+                product.price,
+                product.sku
+            ))
+        conn.commit()
+        return {"message": "Product inserted successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+# Setup MySQL when starting the FastAPI app
+@app.on_event("startup")
+def startup():
+    setup_mysql()
+
+# Host and port setup
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000)
