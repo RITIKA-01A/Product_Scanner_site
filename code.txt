@@ -1,0 +1,130 @@
+# main.py
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+import cv2
+import time
+from PIL import Image
+import json
+import google.generativeai as genai
+from io import BytesIO
+import pymysql
+import re
+
+# Configure Gemini
+genai.configure(api_key="AIzaSyB9gKOT0r4k73X5i-Gt6JNpfLMxWq3HUa8")
+model = genai.GenerativeModel("gemini-2.0-flash")
+
+# MySQL Configuration
+DB_CONFIG = {
+    "host": "192.168.114.170",
+    "user": "root",
+    "password": "ritik@01A",  # Replace with your actual DB password
+    "database": "product_database"
+}
+
+def insert_into_database(data):
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        query = """
+            INSERT INTO product_info (name, brand, product_type, size, expiry, price, sku)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        values = (
+            data.get("name", ""),
+            data.get("brand", ""),
+            data.get("product_type", ""),
+            data.get("size", ""),
+            data.get("expiry", ""),
+            data.get("price", ""),
+            data.get("sku", "")
+        )
+        cursor.execute(query, values)
+        conn.commit()
+        conn.close()
+        print("✅ Inserted into DB.")
+    except Exception as e:
+        print("❌ DB Error:", e)
+
+def extract_info_from_frame(frame):
+    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    try:
+        response = model.generate_content(
+            [
+                """You are an AI OCR system. From the image provided, extract product details and output ONLY a JSON object with the following keys: 
+                name, brand, product_type, size, expiry, price, sku.
+                Return only the JSON object. Do not include any explanation or markdown formatting like ```.""",
+                pil_image
+            ],
+            generation_config={
+                "temperature": 0.3,
+                "top_p": 1,
+                "top_k": 40,
+                "max_output_tokens": 512,
+            },
+            safety_settings={
+                "HARASSMENT": "block_none",
+                "HATE": "block_none",
+                "SEXUAL": "block_none",
+                "DANGEROUS": "block_none",
+            }
+        )
+
+        raw_text = response.text.strip()
+        print("🔍 Full Gemini raw response:", repr(raw_text))
+
+        # Regex to extract the JSON object only
+        match = re.search(r"\{[\s\S]*\}", raw_text)
+        if match:
+            json_data = match.group(0)
+            return json.loads(json_data)
+        else:
+            print("⚠️ No valid JSON object found in Gemini response.")
+            return {"raw_response": raw_text, "error": "No valid JSON object found"}
+    except Exception as e:
+        print("❌ Error from Gemini:", e)
+        return {"raw_response": raw_text if 'raw_text' in locals() else '', "error": str(e)}
+
+# FastAPI App
+app = FastAPI()
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://192.168.114.170:3000"],  # Replace with frontend domain in prod
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/start-scanner")
+async def start_scanner():
+    cap = cv2.VideoCapture(0)
+    last_capture = time.time()
+    scan_interval = 3
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                return {"error": "Failed to capture frame"}
+
+            now = time.time()
+            if now - last_capture >= scan_interval:
+                data = extract_info_from_frame(frame)
+                if data:
+                    insert_into_database(data)
+                    cap.release()
+                    return {"message": "Scanned and saved", "data": data}
+                else:
+                    print("⚠️ No valid data returned from Gemini.")
+                last_capture = now
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        cap.release()
+
+    return {"message": "Done"}
